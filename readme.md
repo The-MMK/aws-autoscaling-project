@@ -4,8 +4,6 @@ This project demonstrates how to create a highly available and scalable web appl
 
 ## Architecture
 
-![AWS Architecture](https://via.placeholder.com/800x400?text=AWS+Auto+Scaling+Architecture)
-
 The infrastructure includes:
 
 - **VPC with 3 Availability Zones** - Each containing public and private subnets
