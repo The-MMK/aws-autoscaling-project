@@ -1,0 +1,197 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Auto Scaling Group with Application Load Balancer and Scaling Policies'
+
+Parameters:
+  VpcStackName:
+    Description: Name of the VPC CloudFormation stack
+    Type: String
+    Default: vpc-stack
+
+  LaunchTemplateStackName:
+    Description: Name of the Launch Template CloudFormation stack
+    Type: String
+    Default: launch-template-stack
+
+  MinSize:
+    Description: Minimum number of instances in the Auto Scaling group
+    Type: Number
+    Default: 2
+    MinValue: 1
+    MaxValue: 10
+
+  MaxSize:
+    Description: Maximum number of instances in the Auto Scaling group
+    Type: Number
+    Default: 6
+    MinValue: 1
+    MaxValue: 10
+
+  DesiredCapacity:
+    Description: Desired number of instances in the Auto Scaling group
+    Type: Number
+    Default: 2
+    MinValue: 1
+    MaxValue: 10
+
+  ScaleUpThreshold:
+    Description: CPU Utilization threshold for scaling up
+    Type: Number
+    Default: 70
+    MinValue: 1
+    MaxValue: 100
+
+  ScaleDownThreshold:
+    Description: CPU Utilization threshold for scaling down
+    Type: Number
+    Default: 30
+    MinValue: 1
+    MaxValue: 100
+
+Resources:
+  # ALB Security Group
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group for ALB
+      VpcId:
+        Fn::ImportValue: !Sub "${VpcStackName}-VpcId"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: ALB-SecurityGroup
+
+  # Application Load Balancer
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: WebServerALB
+      Scheme: internet-facing
+      Type: application
+      Subnets:
+        - Fn::ImportValue: !Sub "${VpcStackName}-PublicSubnet1"
+        - Fn::ImportValue: !Sub "${VpcStackName}-PublicSubnet2"
+        - Fn::ImportValue: !Sub "${VpcStackName}-PublicSubnet3"
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      Tags:
+        - Key: Name
+          Value: WebServer-ALB
+
+  # ALB Target Group
+  ALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: WebServerTargetGroup
+      Port: 80
+      Protocol: HTTP
+      TargetType: instance
+      VpcId:
+        Fn::ImportValue: !Sub "${VpcStackName}-VpcId"
+      HealthCheckEnabled: true
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: /
+      HealthCheckPort: traffic-port
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      Matcher:
+        HttpCode: '200'
+      Tags:
+        - Key: Name
+          Value: WebServer-TargetGroup
+
+  # ALB Listener
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+
+  # Auto Scaling Group
+  WebServerAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: WebServerASG
+      MinSize: !Ref MinSize
+      MaxSize: !Ref MaxSize
+      DesiredCapacity: !Ref DesiredCapacity
+      LaunchTemplate:
+        LaunchTemplateId:
+          Fn::ImportValue: !Sub "${LaunchTemplateStackName}-LaunchTemplateId"
+        Version: !GetAtt WebServerLaunchTemplate.LatestVersionNumber
+      VPCZoneIdentifier:
+        - Fn::ImportValue: !Sub "${VpcStackName}-PrivateSubnet1"
+        - Fn::ImportValue: !Sub "${VpcStackName}-PrivateSubnet2"
+        - Fn::ImportValue: !Sub "${VpcStackName}-PrivateSubnet3"
+      TargetGroupARNs:
+        - !Ref ALBTargetGroup
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 300
+      Tags:
+        - Key: Name
+          Value: WebServer-ASG
+          PropagateAtLaunch: true
+
+  # CPU Utilization Scale Up Policy
+  CPUScaleUpPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref WebServerAutoScalingGroup
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+        TargetValue: !Ref ScaleUpThreshold
+
+  # Custom Scale-Out Policy based on request count
+  RequestCountScaleOutPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref WebServerAutoScalingGroup
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ALBRequestCountPerTarget
+          ResourceLabel: !Join 
+            - '/'
+            - - !GetAtt ApplicationLoadBalancer.LoadBalancerFullName
+              - !GetAtt ALBTargetGroup.TargetGroupFullName
+        TargetValue: 1000.0  # Target requests per minute per instance
+
+  # Get reference to Launch Template (for LatestVersionNumber)
+  WebServerLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Join
+        - ''
+        - - Ref: AWS::Region
+          - WebServerTemplateReference
+      VersionDescription: 'Reference only'
+      LaunchTemplateData:
+        ImageId: ami-12345678 # Dummy value, not actually used
+
+Outputs:
+  AutoScalingGroupName:
+    Description: Name of the Auto Scaling Group
+    Value: !Ref WebServerAutoScalingGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-ASGName"
+
+  LoadBalancerDNSName:
+    Description: DNS Name of the Application Load Balancer
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+    Export:
+      Name: !Sub "${AWS::StackName}-ALBDNSName"

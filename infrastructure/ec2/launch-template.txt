@@ -1,0 +1,224 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'EC2 Launch Template with UserData for Auto Scaling Group'
+
+Parameters:
+  VpcStackName:
+    Description: Name of the VPC CloudFormation stack
+    Type: String
+    Default: vpc-stack
+
+  InstanceType:
+    Description: EC2 instance type
+    Type: String
+    Default: t2.micro
+    AllowedValues:
+      - t2.micro
+      - t2.small
+      - t2.medium
+    ConstraintDescription: Must be a valid EC2 instance type.
+
+  LatestAmiId:
+    Description: Latest Amazon Linux 2 AMI
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: '/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2'
+
+Resources:
+  # Security Group for Web Servers
+  WebServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for web servers
+      VpcId: 
+        Fn::ImportValue: !Sub "${VpcStackName}-VpcId"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: WebServer-SecurityGroup
+
+  # EC2 Instance Role
+  WebServerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Path: /
+
+  # Instance Profile
+  WebServerInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /
+      Roles:
+        - !Ref WebServerRole
+
+  # Launch Template
+  WebServerLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: WebServerLaunchTemplate
+      VersionDescription: Initial version
+      LaunchTemplateData:
+        ImageId: !Ref LatestAmiId
+        InstanceType: !Ref InstanceType
+        SecurityGroupIds:
+          - !Ref WebServerSecurityGroup
+        IamInstanceProfile:
+          Name: !Ref WebServerInstanceProfile
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash -xe
+            
+            # Update system packages
+            yum update -y
+            
+            # Install Apache web server
+            yum install -y httpd
+            
+            # Enable and start Apache
+            systemctl enable httpd
+            systemctl start httpd
+            
+            # Get instance metadata
+            TOKEN=$(curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+            INSTANCE_ID=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
+            AVAILABILITY_ZONE=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/availability-zone)
+            
+            # Create a custom index page
+            cat > /var/www/html/index.html << EOF
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Auto Scaling Demo</title>
+                <style>
+                    body {
+                        font-family: Arial, sans-serif;
+                        margin: 0;
+                        padding: 0;
+                        display: flex;
+                        flex-direction: column;
+                        justify-content: center;
+                        align-items: center;
+                        height: 100vh;
+                        background-color: #f0f0f0;
+                    }
+                    .container {
+                        background-color: white;
+                        border-radius: 8px;
+                        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+                        padding: 20px;
+                        width: 80%;
+                        max-width: 800px;
+                        text-align: center;
+                    }
+                    h1 {
+                        color: #232f3e;
+                    }
+                    .info {
+                        background-color: #f8f8f8;
+                        border-radius: 4px;
+                        padding: 10px;
+                        margin-top: 20px;
+                        text-align: left;
+                    }
+                    .aws-orange {
+                        color: #ff9900;
+                    }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <h1>AWS <span class="aws-orange">Auto Scaling</span> Demo</h1>
+                    <p>This instance was automatically provisioned by AWS Auto Scaling.</p>
+                    <div class="info">
+                        <p><strong>Instance ID:</strong> $INSTANCE_ID</p>
+                        <p><strong>Availability Zone:</strong> $AVAILABILITY_ZONE</p>
+                        <p><strong>Date & Time:</strong> <span id="datetime"></span></p>
+                    </div>
+                </div>
+                <script>
+                    document.getElementById('datetime').textContent = new Date().toLocaleString();
+                    setInterval(function() {
+                        document.getElementById('datetime').textContent = new Date().toLocaleString();
+                    }, 1000);
+                </script>
+            </body>
+            </html>
+            EOF
+            
+            # Create a load testing page
+            cat > /var/www/html/load.html << EOF
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Load Generator</title>
+                <style>
+                    body { font-family: Arial, sans-serif; margin: 0; padding: 20px; }
+                    button { padding: 10px; margin: 10px; }
+                </style>
+            </head>
+            <body>
+                <h1>CPU Load Generator</h1>
+                <p>This page will generate CPU load on the server for 30 seconds to test auto scaling.</p>
+                <script>
+                  // Automatically start the load when page loads
+                  window.onload = function() {
+                    const startTime = new Date().getTime();
+                    const duration = 30000; // 30 seconds
+                    
+                    // Function to create CPU load
+                    function generateLoad() {
+                      // Perform heavy calculations
+                      for (let i = 0; i < 10000000; i++) {
+                        Math.sqrt(i) * Math.random();
+                      }
+                      
+                      const currentTime = new Date().getTime();
+                      if (currentTime - startTime < duration) {
+                        // Continue generating load
+                        setTimeout(generateLoad, 0);
+                      } else {
+                        document.body.innerHTML += '<p>Load test completed!</p>';
+                      }
+                    }
+                    
+                    document.body.innerHTML += '<p>Load test running for 30 seconds...</p>';
+                    generateLoad();
+                  };
+                </script>
+            </body>
+            </html>
+            EOF
+            
+            # Set permissions
+            chmod 644 /var/www/html/index.html
+            chmod 644 /var/www/html/load.html
+
+Outputs:
+  LaunchTemplateId:
+    Description: ID of the Launch Template
+    Value: !Ref WebServerLaunchTemplate
+    Export:
+      Name: !Sub "${AWS::StackName}-LaunchTemplateId"
+
+  WebServerSecurityGroupId:
+    Description: ID of the Web Server Security Group
+    Value: !Ref WebServerSecurityGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-WebServerSecurityGroupId"
